@@ -254,24 +254,33 @@ def _floor_rate(list_rate: float, miles: Optional[int], equip: Optional[str]) ->
     if equip in {"Reefer", "Flatbed"}:
         base = max(base, 0.94 * list_rate)
     if miles and miles > 1200:
-        base = max(base, 0.92 * list_rate)
+        base = min(base, 0.92 * list_rate)  
     return round(base, 2)
 
 @app.post("/api/v1/negotiate")
 def negotiate(payload: NegInput, x_api_key: Optional[str] = Header(None)):
     require_key(x_api_key)
     f = _floor_rate(payload.loadboard_rate, payload.miles, payload.equipment_type)
+
     if payload.round_index <= 1:
-        counter = max(f, round(0.98 * payload.loadboard_rate, 2))
+        ceiling = max(f, round(0.98 * payload.loadboard_rate, 2))
     elif payload.round_index == 2:
-        counter = max(f, round(0.95 * payload.loadboard_rate, 2))
+        ceiling = max(f, round(0.95 * payload.loadboard_rate, 2))
     else:
-        counter = f
-    if payload.carrier_offer >= counter:
-        return {"decision": "accept", "counter_offer": payload.carrier_offer, "reason": "meets threshold"}
+        ceiling = f  
+
+    if payload.carrier_offer <= ceiling:
+        return {
+            "decision": "accept",
+            "counter_offer": float(payload.carrier_offer),  # accepted rate
+            "reason": "carrier met or beat our ceiling"
+        }
+
     if payload.round_index >= 3:
-        return {"decision": "reject", "counter_offer": None, "reason": "exceeded rounds"}
-    return {"decision": "counter", "counter_offer": counter, "reason": "within policy"}
+        return {"decision": "reject", "counter_offer": None, "reason": "exceeded rounds / above ceiling"}
+
+    return {"decision": "counter", "counter_offer": ceiling, "reason": "above ceiling this round"}
+
 
 # -------------------- post-call & metrics --------------
 @app.post("/api/v1/call-reports", status_code=201)
