@@ -320,6 +320,7 @@ def metrics_summary(x_api_key: Optional[str] = Header(None)):
     }
 
 # -------------------- HR Metrics + Dashboard --------------------
+
 import json
 from statistics import mean
 from datetime import datetime
@@ -330,6 +331,7 @@ HR_ORG_ID = os.getenv("HR_ORG_ID")
 HR_USE_CASE_ID = os.getenv("HR_USE_CASE_ID")
 DASHBOARD_TOKEN = os.getenv("DASHBOARD_TOKEN")
 
+
 def _hr_headers():
     if not (HR_API_KEY and HR_ORG_ID):
         raise HTTPException(status_code=500, detail="HappyRobot credentials missing (HR_API_KEY / HR_ORG_ID).")
@@ -337,6 +339,7 @@ def _hr_headers():
         "authorization": f"Bearer {HR_API_KEY}",
         "x-organization-id": HR_ORG_ID,
     }
+
 
 def _parse_iso(ts: Optional[str]) -> Optional[datetime]:
     if not ts:
@@ -347,16 +350,11 @@ def _parse_iso(ts: Optional[str]) -> Optional[datetime]:
     except Exception:
         return None
 
+
 def _first_quote_timestamp(run: dict) -> Optional[datetime]:
     """
     Find the earliest time the agent produced a quote/counter (negotiate).
-    We look in multiple places because HappyRobot payloads can vary:
-
-    1) events[].intermediate.name == "negotiate_http"
-    2) events[] with top-level name == "negotiate_http"
-       or (has keys "decision" AND "counter_offer")
-    3) messages[].tool_calls[].function.name in {"negotiate","negotiate_http"}
-    4) last resort: events[] where event_name looks like negotiate variants
+    We look in multiple places because HappyRobot payloads can vary.
     """
     events = run.get("events", [])
     messages = run.get("messages", [])
@@ -386,7 +384,7 @@ def _first_quote_timestamp(run: dict) -> Optional[datetime]:
                 if t:
                     return t
 
-    # 4) some payloads may surface as an AI "action" with a negotiate-ish event_name
+    # 4) AI action with negotiate-ish event_name
     for ev in events:
         en = (ev.get("event_name") or "").lower()
         if "negotiate" in en:
@@ -403,16 +401,18 @@ async def _hr_fetch_runs_list(limit: int = 10):
     params = {"use_case_id": HR_USE_CASE_ID, "limit": limit}
     async with httpx.AsyncClient(timeout=12) as client:
         r = await client.get(url, params=params, headers=_hr_headers())
-    r.raise_for_status()
-    return r.json()  # array of runs (no events/messages)
+        r.raise_for_status()
+        return r.json()  # array of runs (no events/messages)
+
 
 async def _hr_fetch_run_detail(run_id: str):
     """Returns a single run with events/messages detail."""
     url = f"https://platform.happyrobot.ai/api/v1/runs/{run_id}"
     async with httpx.AsyncClient(timeout=12) as client:
         r = await client.get(url, headers=_hr_headers())
-    r.raise_for_status()
-    return r.json()
+        r.raise_for_status()
+        return r.json()
+
 
 def _db_summary():
     """Re-run the same SQL as /api/v1/metrics/summary to avoid HTTP calls to ourselves."""
@@ -420,17 +420,20 @@ def _db_summary():
         total = c.execute("SELECT COUNT(*) FROM calls").fetchone()[0]
         won = c.execute("SELECT COUNT(*) FROM calls WHERE outcome='deal_won'").fetchone()[0]
         rounds = c.execute("SELECT COALESCE(AVG(rounds),0) FROM calls").fetchone()[0]
-        delta = c.execute("""
+        delta = c.execute(
+            """
             SELECT COALESCE(AVG(l.loadboard_rate - COALESCE(c.agreed_rate, l.loadboard_rate)),0)
             FROM calls c JOIN loads l ON l.load_id = c.selected_load_id
             WHERE c.agreed_rate IS NOT NULL
-        """).fetchone()[0]
-        return {
-            "calls": total,
-            "win_rate": (won / total if total else 0),
-            "avg_rounds": rounds or 0,
-            "avg_delta_to_list": delta or 0,
-        }
+            """
+        ).fetchone()[0]
+    return {
+        "calls": total,
+        "win_rate": (won / total if total else 0),
+        "avg_rounds": rounds or 0,
+        "avg_delta_to_list": delta or 0,
+    }
+
 
 @app.get("/dashboard/hr/metrics", response_class=JSONResponse)
 async def hr_metrics(token: Optional[str] = Query(None)):
@@ -438,8 +441,8 @@ async def hr_metrics(token: Optional[str] = Query(None)):
     if DASHBOARD_TOKEN and token != DASHBOARD_TOKEN:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
-    # Pull last N runs, then enrich each with detail (events/messages)
     try:
+        # Pull last N runs, then enrich each with detail (events/messages)
         runs_list = await _hr_fetch_runs_list(limit=10)
         detailed = []
         for r in runs_list:
@@ -475,9 +478,7 @@ async def hr_metrics(token: Optional[str] = Query(None)):
                 resp = out.get("response") or {}
                 classification = resp.get("classification")
                 if classification:
-                    classification_counts[classification] = (
-                        classification_counts.get(classification, 0) + 1
-                    )
+                    classification_counts[classification] = classification_counts.get(classification, 0) + 1
 
         # --- Handle time (prefer session.duration)
         handle_s: Optional[float] = None
@@ -486,11 +487,9 @@ async def hr_metrics(token: Optional[str] = Query(None)):
 
         for ev in events:
             if ev.get("type") == "session":
-                # duration in seconds if provided
                 dur = ev.get("duration")
                 if isinstance(dur, (int, float)):
                     handle_s = float(dur)
-                # session start timestamp (used for TTFQ baseline)
                 session_start = _parse_iso(ev.get("timestamp")) or session_start
 
         if handle_s is None:
@@ -502,7 +501,7 @@ async def hr_metrics(token: Optional[str] = Query(None)):
         if handle_s is not None:
             handle_times.append(handle_s)
 
-        # If we didn't get a session start, fallback to earliest message timestamp
+        # If no explicit session_start, fallback to run timestamp
         if session_start is None:
             session_start = _parse_iso(d.get("timestamp"))
 
@@ -535,8 +534,8 @@ async def hr_metrics(token: Optional[str] = Query(None)):
             "sample_runs": sample_rows,
         },
     }
-
     return JSONResponse(payload)
+
 
 @app.get("/dashboard", response_class=HTMLResponse)
 def dashboard_html(token: Optional[str] = Query(None)):
@@ -554,53 +553,53 @@ def dashboard_html(token: Optional[str] = Query(None)):
 <meta charset="utf-8" />
 <title>Inbound Carrier Sales – Dashboard</title>
 <style>
-  body { font-family: -apple-system, system-ui, Segoe UI, Roboto, Helvetica, Arial, sans-serif; margin: 24px; }
-  .grid { display: grid; grid-template-columns: repeat(2, minmax(260px, 1fr)); gap: 16px; }
-  .card { border: 1px solid #ddd; border-radius: 12px; padding: 16px; }
-  h1 { margin: 0 0 16px 0; }
-  table { border-collapse: collapse; width: 100%; }
-  th, td { border-bottom: 1px solid #eee; padding: 8px; text-align: left; }
-  .kpi { font-size: 28px; font-weight: 700; }
-  .label { color: #666; font-size: 12px; }
-  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
+body { font-family: -apple-system, system-ui, Segoe UI, Roboto, Helvetica, Arial, sans-serif; margin: 24px; }
+.grid { display: grid; grid-template-columns: repeat(2, minmax(260px, 1fr)); gap: 16px; }
+.card { border: 1px solid #ddd; border-radius: 12px; padding: 16px; }
+h1 { margin: 0 0 16px 0; }
+table { border-collapse: collapse; width: 100%; }
+th, td { border-bottom: 1px solid #eee; padding: 8px; text-align: left; }
+.kpi { font-size: 28px; font-weight: 700; }
+.label { color: #666; font-size: 12px; }
+.mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
 </style>
 </head>
 <body>
-  <h1>Inbound Carrier Sales – Dashboard</h1>
-  <div class="grid">
-    <div class="card"><div class="label">DB Calls</div><div id="db_calls" class="kpi">–</div></div>
-    <div class="card"><div class="label">Win Rate</div><div id="win_rate" class="kpi">–</div></div>
-    <div class="card"><div class="label">Avg Rounds</div><div id="avg_rounds" class="kpi">–</div></div>
-    <div class="card"><div class="label">Avg Δ to List ($)</div><div id="avg_delta" class="kpi">–</div></div>
-  </div>
 
-  <div class="grid" style="margin-top:20px;">
-    <div class="card"><div class="label">Avg Handle Time (s)</div><div id="avg_handle" class="kpi">–</div></div>
-    <div class="card"><div class="label">Avg Time to First Quote (s)</div><div id="avg_ttfq" class="kpi">–</div></div>
-  </div>
+<h1>Inbound Carrier Sales – Dashboard</h1>
 
-  <div class="card" style="margin-top:20px;">
-    <div class="label">Classification Counts</div>
-    <pre id="class_counts" class="mono">–</pre>
-  </div>
+<div class="grid">
+  <div class="card"><div class="label">DB Calls</div><div id="db_calls" class="kpi">–</div></div>
+  <div class="card"><div class="label">Win Rate</div><div id="win_rate" class="kpi">–</div></div>
+  <div class="card"><div class="label">Avg Rounds</div><div id="avg_rounds" class="kpi">–</div></div>
+  <div class="card"><div class="label">Avg Δ to List ($)</div><div id="avg_delta" class="kpi">–</div></div>
+</div>
 
-  <div class="card" style="margin-top:20px;">
-    <div class="label">Recent Runs (sample)</div>
-    <table>
-      <thead>
-        <tr>
-            <th>Run ID</th>
-            <th>Classification</th>
-            <th title="Total call duration in seconds">Call Duration (sec)</th>
-            <th title="Elapsed seconds from call start until the agent first quotes or counters a price">
-                Time to First Quote (sec)
-            </th>
-            <th>Completed</th>
-        </tr>
-      </thead>
-      <tbody id="runs"></tbody>
-    </table>
-  </div>
+<div class="grid" style="margin-top:20px;">
+  <div class="card"><div class="label">Avg Handle Time (s)</div><div id="avg_handle" class="kpi">–</div></div>
+  <div class="card"><div class="label">Avg Time to First Quote (s)</div><div id="avg_ttfq" class="kpi">–</div></div>
+</div>
+
+<div class="card" style="margin-top:20px;">
+  <div class="label">Classification Counts</div>
+  <pre id="class_counts" class="mono">–</pre>
+</div>
+
+<div class="card" style="margin-top:20px;">
+  <div class="label">Recent Runs (sample)</div>
+  <table>
+    <thead>
+      <tr>
+        <th>Run ID</th>
+        <th>Classification</th>
+        <th title="Total call duration in seconds">Call Duration (sec)</th>
+        <th title="Elapsed seconds from call start until the agent first quotes or counters a price">Time to First Quote (sec)</th>
+        <th>Completed</th>
+      </tr>
+    </thead>
+    <tbody id="runs"></tbody>
+  </table>
+</div>
 
 <script>
 const DASH_TOKEN = __TOKEN__;
@@ -627,21 +626,24 @@ const DASH_TOKEN = __TOKEN__;
   const tb = document.getElementById('runs');
   (d.hr.sample_runs || []).forEach(r => {
     const tr = document.createElement('tr');
+    const fmtCell = v => (v != null ? Number(v).toFixed(1) : 'N/A'); // <-- show N/A when null
     tr.innerHTML = `
       <td class="mono">${r.run_id || ''}</td>
       <td>${r.classification || ''}</td>
-      <td>${r.handle_time_s != null ? r.handle_time_s.toFixed(1) : ''}</td>
-      <td>${r.time_to_first_quote_s != null ? r.time_to_first_quote_s.toFixed(1) : ''}</td>
+      <td>${fmtCell(r.handle_time_s)}</td>
+      <td>${fmtCell(r.time_to_first_quote_s)}</td>
       <td>${r.completed_at || ''}</td>
     `;
     tb.appendChild(tr);
   });
 })();
 </script>
+
 </body>
 </html>
 """
     # inject the token without touching any other braces
     html = html.replace("__TOKEN__", js_token)
     return HTMLResponse(html)
+
 # ------------------ end HR Metrics + Dashboard ------------------
