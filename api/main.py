@@ -1,6 +1,7 @@
 import os, sqlite3, time
 from typing import Optional, List
-from fastapi import FastAPI, HTTPException, Header, Query, HTMLResponse
+from fastapi import FastAPI, HTTPException, Header, Query
+from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
 import httpx
 from dotenv import load_dotenv
@@ -323,8 +324,6 @@ import json
 from statistics import mean
 from datetime import datetime
 from typing import Optional
-from fastapi import Query
-from fastapi.responses import JSONResponse, HTMLResponse
 
 HR_API_KEY = os.getenv("HR_API_KEY")
 HR_ORG_ID = os.getenv("HR_ORG_ID")
