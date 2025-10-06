@@ -348,31 +348,54 @@ def _parse_iso(ts: Optional[str]) -> Optional[datetime]:
         return None
 
 def _first_quote_timestamp(run: dict) -> Optional[datetime]:
-    """Find the earliest time the agent produced a quote/counter (negotiate)."""
+    """
+    Find the earliest time the agent produced a quote/counter (negotiate).
+    We look in multiple places because HappyRobot payloads can vary:
+
+    1) events[].intermediate.name == "negotiate_http"
+    2) events[] with top-level name == "negotiate_http"
+       or (has keys "decision" AND "counter_offer")
+    3) messages[].tool_calls[].function.name in {"negotiate","negotiate_http"}
+    4) last resort: events[] where event_name looks like negotiate variants
+    """
     events = run.get("events", [])
-    # 1) intermediate negotiate_http
+    messages = run.get("messages", [])
+
+    # 1) "intermediate" negotiate_http
     for ev in events:
         inter = ev.get("intermediate") or {}
         if (inter.get("name") or "").lower() == "negotiate_http":
             ts = _parse_iso(ev.get("timestamp"))
             if ts:
                 return ts
-    # 2) top-level negotiate_http, or decision+counter_offer bundle
+
+    # 2) top-level negotiate_http OR decision+counter_offer
     for ev in events:
         name = (ev.get("name") or "").lower()
         if name == "negotiate_http" or ("decision" in ev and "counter_offer" in ev):
             ts = _parse_iso(ev.get("timestamp"))
             if ts:
                 return ts
-    # 3) scan messages tool_calls for negotiate
-    for m in run.get("messages", []):
+
+    # 3) messages tool_calls showing negotiate
+    for m in messages:
         t = _parse_iso(m.get("timestamp"))
         for tc in (m.get("tool_calls") or []):
             fn = ((tc.get("function") or {}).get("name") or "").lower()
             if fn in ("negotiate", "negotiate_http"):
                 if t:
                     return t
+
+    # 4) some payloads may surface as an AI "action" with a negotiate-ish event_name
+    for ev in events:
+        en = (ev.get("event_name") or "").lower()
+        if "negotiate" in en:
+            ts = _parse_iso(ev.get("timestamp"))
+            if ts:
+                return ts
+
     return None
+
 
 async def _hr_fetch_runs_list(limit: int = 10):
     """Returns a list of recent runs (light payload)."""
@@ -481,10 +504,7 @@ async def hr_metrics(token: Optional[str] = Query(None)):
 
         # If we didn't get a session start, fallback to earliest message timestamp
         if session_start is None:
-            for m in d.get("messages", []):
-                mt = _parse_iso(m.get("timestamp"))
-                if mt and (session_start is None or mt < session_start):
-                    session_start = mt
+            session_start = _parse_iso(d.get("timestamp"))
 
         # --- Time to First Quote: robust detection
         first_quote_ts = _first_quote_timestamp(d)
@@ -567,7 +587,17 @@ def dashboard_html(token: Optional[str] = Query(None)):
   <div class="card" style="margin-top:20px;">
     <div class="label">Recent Runs (sample)</div>
     <table>
-      <thead><tr><th>Run ID</th><th>Classification</th><th>Handle (s)</th><th>Ttfq (s)</th><th>Completed</th></tr></thead>
+      <thead>
+        <tr>
+            <th>Run ID</th>
+            <th>Classification</th>
+            <th title="Total call duration in seconds">Call Duration (sec)</th>
+            <th title="Elapsed seconds from call start until the agent first quotes or counters a price">
+                Time to First Quote (sec)
+            </th>
+            <th>Completed</th>
+        </tr>
+      </thead>
       <tbody id="runs"></tbody>
     </table>
   </div>
