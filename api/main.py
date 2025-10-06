@@ -347,6 +347,33 @@ def _parse_iso(ts: Optional[str]) -> Optional[datetime]:
     except Exception:
         return None
 
+def _first_quote_timestamp(run: dict) -> Optional[datetime]:
+    """Find the earliest time the agent produced a quote/counter (negotiate)."""
+    events = run.get("events", [])
+    # 1) intermediate negotiate_http
+    for ev in events:
+        inter = ev.get("intermediate") or {}
+        if (inter.get("name") or "").lower() == "negotiate_http":
+            ts = _parse_iso(ev.get("timestamp"))
+            if ts:
+                return ts
+    # 2) top-level negotiate_http, or decision+counter_offer bundle
+    for ev in events:
+        name = (ev.get("name") or "").lower()
+        if name == "negotiate_http" or ("decision" in ev and "counter_offer" in ev):
+            ts = _parse_iso(ev.get("timestamp"))
+            if ts:
+                return ts
+    # 3) scan messages tool_calls for negotiate
+    for m in run.get("messages", []):
+        t = _parse_iso(m.get("timestamp"))
+        for tc in (m.get("tool_calls") or []):
+            fn = ((tc.get("function") or {}).get("name") or "").lower()
+            if fn in ("negotiate", "negotiate_http"):
+                if t:
+                    return t
+    return None
+
 async def _hr_fetch_runs_list(limit: int = 10):
     """Returns a list of recent runs (light payload)."""
     url = "https://platform.happyrobot.ai/api/v1/runs"
@@ -404,11 +431,10 @@ async def hr_metrics(token: Optional[str] = Query(None)):
     except httpx.HTTPError as e:
         raise HTTPException(status_code=502, detail=f"HappyRobot API error: {e}")
 
-    classification_counts = {}
-    handle_times = []
-    ttfq_times = []  # time to first quote (s)
-
-    sample_rows = []
+    classification_counts: dict[str, int] = {}
+    handle_times: list[float] = []
+    ttfq_times: list[float] = []
+    sample_rows: list[dict] = []
 
     for d in detailed:
         run_id = d.get("id")
@@ -417,25 +443,33 @@ async def hr_metrics(token: Optional[str] = Query(None)):
         # --- Classification (from AI -> Classify output)
         classification = None
         for ev in events:
-            if ev.get("type") == "action" and ev.get("integration_name") == "AI" and ev.get("event_name") == "Classify":
+            if (
+                ev.get("type") == "action"
+                and ev.get("integration_name") == "AI"
+                and ev.get("event_name") == "Classify"
+            ):
                 out = ev.get("output") or {}
                 resp = out.get("response") or {}
                 classification = resp.get("classification")
-        if classification:
-            classification_counts[classification] = classification_counts.get(classification, 0) + 1
+                if classification:
+                    classification_counts[classification] = (
+                        classification_counts.get(classification, 0) + 1
+                    )
 
         # --- Handle time (prefer session.duration)
-        handle_s = None
-        session_start = None
+        handle_s: Optional[float] = None
+        session_start: Optional[datetime] = None
         completed_at = d.get("completed_at")
+
         for ev in events:
             if ev.get("type") == "session":
                 # duration in seconds if provided
                 dur = ev.get("duration")
                 if isinstance(dur, (int, float)):
                     handle_s = float(dur)
-                # session start timestamp (fallback for TTFQ)
+                # session start timestamp (used for TTFQ baseline)
                 session_start = _parse_iso(ev.get("timestamp")) or session_start
+
         if handle_s is None:
             # Fallback: difference between run timestamp and completed_at
             t0 = _parse_iso(d.get("timestamp"))
@@ -445,29 +479,32 @@ async def hr_metrics(token: Optional[str] = Query(None)):
         if handle_s is not None:
             handle_times.append(handle_s)
 
-        # --- Time to First Quote (first negotiate_http event - session start)
-        first_quote_ts = None
-        for ev in events:
-            # negotiate_http appears as an "intermediate" with name="negotiate_http"
-            if ev.get("intermediate") and (ev.get("intermediate") or {}).get("name") == "negotiate_http":
-                first_quote_ts = _parse_iso(ev.get("timestamp"))
-                break
-            # Some payloads put it at the top-level event with keys decision/counter_offer
-            if ev.get("name") == "negotiate_http" or ("decision" in ev and "counter_offer" in ev):
-                first_quote_ts = _parse_iso(ev.get("timestamp"))
-                break
+        # If we didn't get a session start, fallback to earliest message timestamp
+        if session_start is None:
+            for m in d.get("messages", []):
+                mt = _parse_iso(m.get("timestamp"))
+                if mt and (session_start is None or mt < session_start):
+                    session_start = mt
 
+        # --- Time to First Quote: robust detection
+        first_quote_ts = _first_quote_timestamp(d)
         if first_quote_ts and session_start:
             ttfq_times.append(max(0.0, (first_quote_ts - session_start).total_seconds()))
 
         # --- Row for the table
-        sample_rows.append({
-            "run_id": run_id,
-            "classification": classification,
-            "handle_time_s": handle_s,
-            "time_to_first_quote_s": max(0.0, (first_quote_ts - session_start).total_seconds()) if (first_quote_ts and session_start) else None,
-            "completed_at": completed_at,
-        })
+        sample_rows.append(
+            {
+                "run_id": run_id,
+                "classification": classification,
+                "handle_time_s": handle_s,
+                "time_to_first_quote_s": (
+                    max(0.0, (first_quote_ts - session_start).total_seconds())
+                    if (first_quote_ts and session_start)
+                    else None
+                ),
+                "completed_at": completed_at,
+            }
+        )
 
     payload = {
         "db": _db_summary(),
@@ -476,8 +513,9 @@ async def hr_metrics(token: Optional[str] = Query(None)):
             "avg_time_to_first_quote_s": (mean(ttfq_times) if ttfq_times else 0.0),
             "classification_counts": classification_counts,
             "sample_runs": sample_rows,
-        }
+        },
     }
+
     return JSONResponse(payload)
 
 @app.get("/dashboard", response_class=HTMLResponse)
